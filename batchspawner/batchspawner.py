@@ -106,6 +106,18 @@ class BatchSpawnerBase(Spawner):
                            """
                            ).tag(config=True)
 
+    hub_api_url = Unicode('',
+                          help="""If set, Spawner will configure the containers
+                to use the specified URL to connect the hub api.
+                This is useful when the hub_api is bound to listen
+                on all ports or is running inside of a container."""
+                          ).tag(config=True)
+
+    tunnel = Unicode('/srv/tunnel.sh',
+                          help="""This is the path to a tunnel script to establish
+                a tunnel to the compute system"""
+                          ).tag(config=True)
+
     # all these req_foo traits will be available as substvars for templated strings
     req_queue = Unicode('', config=True, \
         help="Queue name to submit job to resource manager"
@@ -269,7 +281,6 @@ class BatchSpawnerBase(Spawner):
     def get_args(self):
         """override get_args to fix url"""
         args=super(BatchSpawnerBase, self).get_args()
-        self.hub_api_url="http://jupyter-dev.nersc.gov:7082/hub/api"
         if self.hub_api_url != '':
              old = '--hub-api-url=%s' % self.hub.api_url
              new = '--hub-api-url=%s' % self.hub_api_url
@@ -363,10 +374,16 @@ class BatchSpawnerBase(Spawner):
                 assert self.state_ispending()
             yield gen.sleep(self.startup_poll_interval)
 
-        cmd="/tmp/tunnel.sh %s %s %d"%(self.user.name,self.state_gethost(),self.user.server.port)
-        print(cmd)
-        out = run_command(cmd)
-        self.user.server.ip = '127.0.0.1'
+        self.user.server.ip = self.state_gethost()
+        subvars = self.get_req_subvars()
+        if 'host' in subvars:
+          cmd="%s %s %s %d %s"%(self.tunnel,
+		self.user.name,self.state_gethost(),
+		self.user.server.port,subvars['host'])
+          print(cmd)
+          out = run_command(cmd)
+          self.user.server.ip = '127.0.0.1'
+
         self.db.commit()
         self.log.info("Notebook server job {0} started at {1}:{2}".format(
                         self.job_id, self.user.server.ip, self.user.server.port)
