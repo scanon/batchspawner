@@ -82,6 +82,29 @@ class BatchSpawnerBase(Spawner):
 
     # override default server ip since batch jobs normally running remotely
     ip = Unicode("0.0.0.0", config=True, help="Address for singleuser server to listen at")
+    #launcher = 'sudo -E -u {username} '
+    #launcher = 'gsissh -l {username} -p 2224 {host} '
+    launcher = Unicode('sudo -E -u {username} ', config=True, \
+        help="Launcher for batch commands.  Default is sudo."
+        )
+
+    gsi_cert_path = Unicode('/tmp/x509_%U',
+                            help="""The GSI certificate used to authenticate the hub with the
+                            remote host. (Assumes use_gsi=True)
+
+                            `~` will be expanded to the user's home directory
+                            `%U` will be expanded to the user's username
+                            """
+                            ).tag(config=True)
+
+    gsi_key_path = Unicode('/tmp/x509_%U',
+                           help="""The GSI key used to authenticate the hub with the
+                           remote host. (Assumes use_gsi=True)
+
+                           `~` will be expanded to the user's home directory
+                           `%U` will be expanded to the user's username
+                           """
+                           ).tag(config=True)
 
     # all these req_foo traits will be available as substvars for templated strings
     req_queue = Unicode('', config=True, \
@@ -115,7 +138,23 @@ class BatchSpawnerBase(Spawner):
     # Useful IF getpwnam on submit host returns correct info for exec host
     req_homedir = Unicode()
     def _req_homedir_default(self):
-        return pwd.getpwnam(self.user.name).pw_dir
+        return "/tmp" 
+    #pwd.getpwnam(self.user.name).pw_dir
+
+    def get_gsi_cert(self):
+        """
+        Returns location of x509 user cert. Override this if you need to
+        return a different path
+        """
+        return self.gsi_cert_path.replace("%U", self.user.name)
+
+    def get_gsi_key(self):
+        """
+        Returns location of x509 user key. Override this if you need to
+        return a different path
+        """
+        return self.gsi_key_path.replace("%U", self.user.name)
+
 
     req_keepvars = Unicode()
     def _req_keepvars_default(self):
@@ -149,17 +188,31 @@ class BatchSpawnerBase(Spawner):
         "Parse output of submit command to get job id."
         return output
 
+    def get_env_string(self):
+        envs=self.get_env()
+        en=''
+        for e in envs:
+          en=en+"export %s=%s\n"%(e,envs[e])
+          print(e)
+        return en
+
     @gen.coroutine
     def submit_batch_script(self):
         subvars = self.get_req_subvars()
-        cmd = self.batch_submit_cmd.format(**subvars)
+        batch_submit_cmd=self.launcher+self.batch_submit_cmd
+        cmd = batch_submit_cmd.format(**subvars)
         subvars['cmd'] = ' '.join(self.cmd + self.get_args())
         if hasattr(self, 'user_options'):
             subvars['user_options'] = self.user_options
+        subvars['env']=self.get_env_string()
         script = self.batch_script.format(**subvars)
+        print(script)
         self.log.info('Spawner submitting job using ' + cmd)
         self.log.info('Spawner submitted script:\n' + script)
-        out = yield run_command(cmd, input=script, env=self.get_env())
+        env=self.get_env()
+        env['X509_USER_CERT'] = self.get_gsi_cert()
+        env['X509_USER_KEY'] = self.get_gsi_key() 
+        out = yield run_command(cmd, input=script, env=env)
         try:
             self.log.info('Job submitted. cmd: ' + cmd + ' output: ' + out)
             self.job_id = self.parse_job_id(out)
@@ -182,10 +235,14 @@ class BatchSpawnerBase(Spawner):
             return self.job_status
         subvars = self.get_req_subvars()
         subvars['job_id'] = self.job_id
-        cmd = self.batch_query_cmd.format(**subvars)
+        batch_query_cmd=self.launcher+self.batch_query_cmd
+        cmd = batch_query_cmd.format(**subvars)
         self.log.debug('Spawner querying job: ' + cmd)
         try:
-            out = yield run_command(cmd)
+            env=self.get_env()
+            env['X509_USER_CERT'] = self.get_gsi_cert()
+            env['X509_USER_KEY'] = self.get_gsi_cert()
+            out = yield run_command(cmd,env=env)
             self.job_status = out
         except Exception as e:
             self.log.error('Error querying job ' + self.job_id)
@@ -201,9 +258,26 @@ class BatchSpawnerBase(Spawner):
     def cancel_batch_job(self):
         subvars = self.get_req_subvars()
         subvars['job_id'] = self.job_id
-        cmd = self.batch_cancel_cmd.format(**subvars)
+        batch_cancel_cmd=self.launcher+self.batch_cancel_cmd
+        cmd = batch_cancel_cmd.format(**subvars)
         self.log.info('Cancelling job ' + self.job_id + ': ' + cmd)
-        yield run_command(cmd)
+        env=self.get_env()
+        env['X509_USER_CERT'] = self.get_gsi_cert()
+        env['X509_USER_KEY'] = self.get_gsi_cert()
+        yield run_command(cmd,env=env)
+
+    def get_args(self):
+        """override get_args to fix url"""
+        args=super(BatchSpawnerBase, self).get_args()
+        self.hub_api_url="http://jupyter-dev.nersc.gov:7082/hub/api"
+        if self.hub_api_url != '':
+             old = '--hub-api-url=%s' % self.hub.api_url
+             new = '--hub-api-url=%s' % self.hub_api_url
+             for index, value in enumerate(args):
+                 if value == old:
+                     print("Fixing hub api url")
+                     args[index] = new
+        return args
 
     def load_state(self, state):
         """load job_id from state"""
@@ -275,6 +349,7 @@ class BatchSpawnerBase(Spawner):
         # So this function should not return unless successful, and if unsuccessful
         # should either raise and Exception or loop forever.
         assert len(self.job_id) > 0
+        yield gen.sleep(5)
         while True:
             yield self.poll()
             if self.state_isrunning():
@@ -288,11 +363,15 @@ class BatchSpawnerBase(Spawner):
                 assert self.state_ispending()
             yield gen.sleep(self.startup_poll_interval)
 
-        self.user.server.ip = self.state_gethost()
+        cmd="/tmp/tunnel.sh %s %s %d"%(self.user.name,self.state_gethost(),self.user.server.port)
+        print(cmd)
+        out = run_command(cmd)
+        self.user.server.ip = '127.0.0.1'
         self.db.commit()
         self.log.info("Notebook server job {0} started at {1}:{2}".format(
                         self.job_id, self.user.server.ip, self.user.server.port)
             )
+        return (self.user.server.ip,self.user.server.port)
 
     @gen.coroutine
     def stop(self, now=False):
@@ -386,10 +465,10 @@ class TorqueSpawner(BatchSpawnerRegexStates):
         config=True)
 
     # outputs job id string
-    batch_submit_cmd = Unicode('sudo -E -u {username} qsub', config=True)
+    batch_submit_cmd = Unicode('qsub', config=True)
     # outputs job data XML string
-    batch_query_cmd = Unicode('sudo -E -u {username} qstat -x {job_id}', config=True)
-    batch_cancel_cmd = Unicode('sudo -E -u {username} qdel {job_id}', config=True)
+    batch_query_cmd = Unicode('qstat -x {job_id}', config=True)
+    batch_cancel_cmd = Unicode('qdel {job_id}', config=True)
     # search XML string for job_state - [QH] = pending, R = running, [CE] = done
     state_pending_re = Unicode(r'<job_state>[QH]</job_state>', config=True)
     state_running_re = Unicode(r'<job_state>R</job_state>', config=True)
@@ -405,7 +484,7 @@ class UserEnvMixin:
         env['HOME'] = pwd.getpwnam(self.user.name).pw_dir
         return env
 
-    def _env_default(self):
+    def _xenv_default(self):
         env = super()._env_default()
         return self.user_env(env)
 
@@ -422,26 +501,30 @@ class SlurmSpawner(BatchSpawnerRegexStates,UserEnvMixin):
         )
 
     batch_script = Unicode("""#!/bin/bash
-#SBATCH --partition={partition}
+#SBATCH --partition=realtime #{partition}
 #SBATCH --time={runtime}
-#SBATCH --output={homedir}/jupyterhub_slurmspawner_%j.log
+#SBATCH --output=jupyterhub_slurmspawner_%j.log
 #SBATCH --job-name=spawner-jupyterhub
-#SBATCH --workdir={homedir}
+#XBATCH --workdir={homedir}
 #SBATCH --mem={memory}
 #SBATCH --export={keepvars}
 #SBATCH --uid={username}
 #SBATCH --get-user-env=L
+#SBATCH --qos=realtime
 #SBATCH {options}
 
+{env}
+PATH='/global/common/cori/software/python/3.5-anaconda/bin:/global/common/cori/das/jupyterhub/:/usr/common/usg/bin:/usr/bin:/bin:/usr/bin/X11:/usr/games:/usr/lib/mit/bin:/usr/lib/mit/sbin'
+
 which jupyterhub-singleuser
-{cmd}
+{cmd} >> jupyterhub.log
 """,
         config=True)
     # outputs line like "Submitted batch job 209"
-    batch_submit_cmd = Unicode('sudo -E -u {username} sbatch', config=True)
+    batch_submit_cmd = Unicode('sbatch', config=True)
     # outputs status and exec node like "RUNNING hostname"
-    batch_query_cmd = Unicode('sudo -E -u {username} squeue -h -j {job_id} -o "%T %B"', config=True) #
-    batch_cancel_cmd = Unicode('sudo -E -u {username} scancel {job_id}', config=True)
+    batch_query_cmd = Unicode('squeue -h -j {job_id} -o \\"%T %B\\"', config=True) #
+    batch_cancel_cmd = Unicode('scancel {job_id}', config=True)
     # use long-form states: PENDING,  CONFIGURING = pending
     #  RUNNING,  COMPLETING = running
     state_pending_re = Unicode(r'^(?:PENDING|CONFIGURING)', config=True)
@@ -470,10 +553,10 @@ class GridengineSpawner(BatchSpawnerBase):
         config=True)
 
     # outputs job id string
-    batch_submit_cmd = Unicode('sudo -E -u {username} qsub', config=True)
+    batch_submit_cmd = Unicode('qsub', config=True)
     # outputs job data XML string
-    batch_query_cmd = Unicode('sudo -E -u {username} qstat -xml', config=True)
-    batch_cancel_cmd = Unicode('sudo -E -u {username} qdel {job_id}', config=True)
+    batch_query_cmd = Unicode('qstat -xml', config=True)
+    batch_cancel_cmd = Unicode('qdel {job_id}', config=True)
 
     def parse_job_id(self, output):
         return output.split(' ')[2]
