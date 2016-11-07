@@ -143,6 +143,10 @@ class BatchSpawnerBase(Spawner):
         help="Other options to include into job submission script"
         )
 
+    req_precmd = Unicode('', config=True, \
+        help="Optional command to run before starting jupyterhub"
+        )
+
     req_username = Unicode()
     def _req_username_default(self):
         return self.user.name
@@ -218,7 +222,6 @@ class BatchSpawnerBase(Spawner):
             subvars['user_options'] = self.user_options
         subvars['env']=self.get_env_string()
         script = self.batch_script.format(**subvars)
-        print(script)
         self.log.info('Spawner submitting job using ' + cmd)
         self.log.info('Spawner submitted script:\n' + script)
         env=self.get_env()
@@ -516,24 +519,23 @@ class SlurmSpawner(BatchSpawnerRegexStates,UserEnvMixin):
     req_qos = Unicode('', config=True, \
         help="QoS name to submit job to resource manager"
         )
+    req_nodes = Unicode('1', config=True, \
+        help="Number of nodes",
+        )
 
     batch_script = Unicode("""#!/bin/bash
-#SBATCH --partition=realtime #{partition}
+#SBATCH --partition={partition}
+#SBATCH -N {nodes}
 #SBATCH --time={runtime}
 #SBATCH --output=jupyterhub_slurmspawner_%j.log
 #SBATCH --job-name=spawner-jupyterhub
-#XBATCH --workdir={homedir}
-#SBATCH --mem={memory}
-#SBATCH --export={keepvars}
-#SBATCH --uid={username}
-#SBATCH --get-user-env=L
-#SBATCH --qos=realtime
 #SBATCH {options}
 
 {env}
 PATH='/global/common/cori/software/python/3.5-anaconda/bin:/global/common/cori/das/jupyterhub/:/usr/common/usg/bin:/usr/bin:/bin:/usr/bin/X11:/usr/games:/usr/lib/mit/bin:/usr/lib/mit/sbin'
 
 which jupyterhub-singleuser
+{precmd}
 {cmd} >> jupyterhub.log
 """,
         config=True)
