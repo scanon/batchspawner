@@ -146,6 +146,13 @@ class ProfilesSpawner(WrapSpawner):
         <select class="form-control" name="profile" required autofocus>
         {input_template}
         </select>
+        Nodes :<br>
+        <input type="text" name="nodes" value="1"><br>        
+        Partition/Queue :<br>
+        <input type="text" name="partition" value="debug"><br>        
+        Reservation (Optional) :<br>
+        <input type="text" name="reservation"><br>
+        <label>Real-time Queue (Requires Approval) : <input type="checkbox" name="realtime"></label><br>
         """,
         config = True,
         help = """Template to use to construct options_form text. {input_template} is replaced with
@@ -177,7 +184,18 @@ class ProfilesSpawner(WrapSpawner):
 
     def options_from_form(self, formdata):
         # Default to first profile if somehow none is provided
-        return dict(profile=formdata.get('profile', [self.profiles[0][1]])[0])
+        if formdata.get('realtime') is not None:
+           realtime=1
+        else:
+           realtime=0
+        x = dict(profile=formdata.get('profile', [self.profiles[0][1]])[0],
+                nodes=int(formdata.get('nodes')[0]),
+                partition=formdata.get('partition')[0],
+                reservation=formdata.get('reservation')[0],
+                realtime=realtime
+		)
+        print(x)
+        return x
 
     # load/get/clear : save/restore child_profile (and on load, use it to update child class/config)
 
@@ -192,6 +210,9 @@ class ProfilesSpawner(WrapSpawner):
     def construct_child(self):
         self.child_profile = self.user_options.get('profile', "")
         self.select_profile(self.child_profile)
+        for key in ('nodes','partition','reservation'):
+           self.child_config[key] = self.user_options.get(key, "")
+        print(self.child_config)
         super().construct_child()
 
     def load_child_class(self, state):
